@@ -824,7 +824,7 @@ async function cppOverrideEdges(queries: QueryBuilder, onYield: MaybeYield): Pro
 // or an `object` (Scala) so the loop also iterates those kinds.
 const IFACE_OVERRIDE_LANGS = new Set([
   'java', 'kotlin', 'csharp', 'typescript', 'javascript', 'swift', 'scala', 'go', 'rust',
-  'arkts',
+  'arkts', 'php',
 ]);
 /**
  * Go implicit interface satisfaction (#584). Go has no `implements` keyword — a
@@ -3519,6 +3519,76 @@ export interface SynthPassDef {
   ) => Promise<Edge[]>;
 }
 
+const PHP_PROPERTY_RE = /@property(?:-read|-write)?\s+([A-Za-z_][\w\\|]*)\s+\$(\w+)/g;
+const PHP_PRIMITIVE_TYPES = new Set([
+  'string', 'int', 'integer', 'float', 'double', 'bool', 'boolean',
+  'array', 'null', 'void', 'mixed', 'object', 'callable', 'iterable',
+  'self', 'static', 'parent', 'never', 'true', 'false', 'resource',
+]);
+
+async function phpPhpdocPropertyEdges(queries: QueryBuilder, ctx: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
+  const edges: Edge[] = [];
+  const seen = new Set<string>();
+  let scanned = 0;
+
+  const classKinds: Array<'class' | 'interface' | 'trait'> = ['class', 'interface', 'trait'];
+  for (const kind of classKinds) {
+    for (const cls of queries.getNodesByKind(kind)) {
+      if (cls.language !== 'php') continue;
+      if ((++scanned & 127) === 0) await onYield();
+      const content = ctx.readFile(cls.filePath);
+      if (!content) continue;
+
+      const lines = content.split('\n');
+      let docblock = '';
+      for (let i = (cls.startLine ?? 1) - 2; i >= 0; i--) {
+        const line = lines[i]!.trim();
+        if (line === '' && docblock === '') continue;
+        if (line.startsWith('*') || line.startsWith('/**') || line === '*/') {
+          docblock = lines[i]! + '\n' + docblock;
+          if (line.startsWith('/**')) break;
+        } else {
+          break;
+        }
+      }
+      if (!docblock) continue;
+
+      PHP_PROPERTY_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      let added = 0;
+      while ((m = PHP_PROPERTY_RE.exec(docblock))) {
+        if (added >= 200) break;
+        const rawType = m[1]!;
+        const simpleName = rawType.split('|')[0]!.split('\\').pop()!;
+        if (!simpleName || PHP_PRIMITIVE_TYPES.has(simpleName.toLowerCase())) continue;
+
+        const targets = ctx.getNodesByName(simpleName).filter(
+          (n) => (n.kind === 'class' || n.kind === 'interface' || n.kind === 'trait') && n.language === 'php',
+        );
+        for (const target of targets) {
+          if (target.id === cls.id) continue;
+          const key = `${cls.id}>${target.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          edges.push({
+            source: cls.id,
+            target: target.id,
+            kind: 'references',
+            line: cls.startLine,
+            provenance: 'heuristic',
+            metadata: {
+              synthesizedBy: 'php-phpdoc-property',
+              via: `@property ${rawType} $${m[2]}`,
+            },
+          });
+          added++;
+        }
+      }
+    }
+  }
+  return edges;
+}
+
 const ALWAYS = (): boolean => true;
 
 /**
@@ -3544,7 +3614,7 @@ export const SYNTH_PASSES: SynthPassDef[] = [
   { name: 'cppEdges', gate: (has) => has('cpp'), run: (q, _c, y) => cppOverrideEdges(q, y) },
   {
     name: 'ifaceEdges',
-    gate: (has) => has('java', 'kotlin', 'csharp', 'swift', 'scala', 'go', 'rust', 'arkts', ...JS_FAMILY),
+    gate: (has) => has('java', 'kotlin', 'csharp', 'swift', 'scala', 'go', 'rust', 'arkts', 'php', ...JS_FAMILY),
     run: (q, _c, y) => interfaceOverrideEdges(q, y),
   },
   { name: 'kotlinExpectActual', gate: (has) => has('kotlin'), run: (q, _c, y) => kotlinExpectActualEdges(q, y) },
@@ -3581,6 +3651,7 @@ export const SYNTH_PASSES: SynthPassDef[] = [
     run: (q, c, y) => erlangBehaviourDispatchEdges(q, c, y),
   },
   { name: 'laravelEdges', gate: (has) => has('php'), run: (_q, c, y) => laravelEventEdges(c, y) },
+  { name: 'phpPhpdocEdges', gate: (has) => has('php'), run: (q, c, y) => phpPhpdocPropertyEdges(q, c, y) },
   {
     name: 'cFnPtrEdges',
     gate: (has) => has('c', 'cpp'),
