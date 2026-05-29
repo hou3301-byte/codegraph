@@ -3526,10 +3526,16 @@ const PHP_PRIMITIVE_TYPES = new Set([
   'self', 'static', 'parent', 'never', 'true', 'false', 'resource',
 ]);
 
+const PHP_PROP_CALL_RE = /->(\w+)\s*->\s*(\w+)\s*\(/g;
+
 async function phpPhpdocPropertyEdges(queries: QueryBuilder, ctx: ResolutionContext, onYield: MaybeYield): Promise<Edge[]> {
   const edges: Edge[] = [];
   const seen = new Set<string>();
   let scanned = 0;
+
+  // Phase 1: collect @property declarations → references edges + build prop map for Phase 2.
+  // propMap: propertyName → [{ targetTypeName, annotation }]
+  const propMap = new Map<string, Array<{ targetTypeName: string; annotation: string }>>();
 
   const classKinds: Array<'class' | 'interface' | 'trait'> = ['class', 'interface', 'trait'];
   for (const kind of classKinds) {
@@ -3564,6 +3570,11 @@ async function phpPhpdocPropertyEdges(queries: QueryBuilder, ctx: ResolutionCont
         const simpleName = rawType.split('|')[0]!.split('\\').pop()!;
         if (!simpleName || PHP_PRIMITIVE_TYPES.has(simpleName.toLowerCase())) continue;
 
+        const via = `${annotation} ${rawType} $${propName}`;
+        const entries = propMap.get(propName) ?? [];
+        entries.push({ targetTypeName: simpleName, annotation: via });
+        propMap.set(propName, entries);
+
         const targets = ctx.getNodesByName(simpleName).filter(
           (n) => (n.kind === 'class' || n.kind === 'interface' || n.kind === 'trait') && n.language === 'php',
         );
@@ -3580,7 +3591,7 @@ async function phpPhpdocPropertyEdges(queries: QueryBuilder, ctx: ResolutionCont
             provenance: 'heuristic',
             metadata: {
               synthesizedBy: 'php-phpdoc-property',
-              via: `${annotation} ${rawType} $${propName}`,
+              via,
             },
           });
           added++;
@@ -3588,6 +3599,78 @@ async function phpPhpdocPropertyEdges(queries: QueryBuilder, ctx: ResolutionCont
       }
     }
   }
+
+  // Phase 2: scan all PHP methods for `->propName->methodName(` and synthesize
+  // method→method calls edges through the @property indirection.
+  if (propMap.size > 0) {
+    // Pre-index target class methods by (targetTypeName, methodName) for O(1) lookup.
+    const targetMethodIndex = new Map<string, Node[]>();
+    for (const entries of propMap.values()) {
+      for (const { targetTypeName } of entries) {
+        if (targetMethodIndex.has(targetTypeName)) continue;
+        const targetClasses = ctx.getNodesByName(targetTypeName).filter(
+          (n) => (n.kind === 'class' || n.kind === 'interface' || n.kind === 'trait') && n.language === 'php',
+        );
+        for (const tc of targetClasses) {
+          const methods = queries.getOutgoingEdges(tc.id, ['contains'])
+            .map((e) => queries.getNodeById(e.target))
+            .filter((n): n is Node => !!n && n.kind === 'method');
+          for (const method of methods) {
+            const mKey = `${targetTypeName}::${method.name}`;
+            const arr = targetMethodIndex.get(mKey);
+            if (arr) arr.push(method); else targetMethodIndex.set(mKey, [method]);
+          }
+        }
+      }
+    }
+
+    let fileScanned = 0;
+    for (const file of ctx.getAllFiles()) {
+      if (!file.endsWith('.php')) continue;
+      if ((++fileScanned & 127) === 0) await onYield();
+      const content = ctx.readFile(file);
+      if (!content || !content.includes('->')) continue;
+      const nodesInFile = ctx.getNodesInFile(file);
+      const methods = nodesInFile.filter((n) => n.kind === 'method' && n.language === 'php');
+
+      for (const method of methods) {
+        const src = sliceLines(content, method.startLine, method.endLine);
+        if (!src) continue;
+
+        PHP_PROP_CALL_RE.lastIndex = 0;
+        let cm: RegExpExecArray | null;
+        while ((cm = PHP_PROP_CALL_RE.exec(src))) {
+          const calledProp = cm[1]!;
+          const calledMethod = cm[2]!;
+          const propEntries = propMap.get(calledProp);
+          if (!propEntries) continue;
+
+          for (const { targetTypeName, annotation } of propEntries) {
+            const targets = targetMethodIndex.get(`${targetTypeName}::${calledMethod}`);
+            if (!targets) continue;
+            for (const target of targets) {
+              if (target.id === method.id) continue;
+              const key = `${method.id}>${target.id}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              edges.push({
+                source: method.id,
+                target: target.id,
+                kind: 'calls',
+                line: method.startLine,
+                provenance: 'heuristic',
+                metadata: {
+                  synthesizedBy: 'php-phpdoc-property',
+                  via: `${annotation} → ${calledMethod}`,
+                },
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
   return edges;
 }
 
