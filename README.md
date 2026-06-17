@@ -27,6 +27,79 @@
 
 </div>
 
+---
+
+> **This is a fork of [colbymchenry/codegraph](https://github.com/colbymchenry/codegraph)**
+>
+> Maintained by: SoulChill Server Team
+> Purpose: Enhanced PHP dynamic-dispatch resolution for large-scale PHP codebases
+
+## Fork Changes
+
+### PHP @property PHPDoc Synthesis (2026-05-29)
+
+PHP codebases heavily rely on dynamic dispatch via magic `__get`/`__set` with `@property` PHPDoc annotations. The upstream CodeGraph cannot resolve call chains like `$this->ctx->group->sendGroupMsgSingle()` because it doesn't understand that `$this->ctx` is typed as `Im_Ctx` via `@property`.
+
+This fork adds:
+
+1. **Phase 1 — `@property` to `references` edges**: Parses `@property` annotations from class docblocks and creates `references` edges from the declaring class to the target type.
+
+2. **Phase 2 — Property-chain `calls` edges**: Scans all PHP methods for `$this->prop->method()` patterns and synthesizes `calls` edges from the calling method to the target class's method.
+
+3. **Interface override bridging**: When a `@property` type is an interface, the synthesizer also bridges to concrete implementations.
+
+**Key files:**
+- `src/resolution/callback-synthesizer.ts` — `phpPhpdocPropertyEdges()` function (Phase 1 + Phase 2)
+- `src/resolution/frameworks/php-phpdoc.ts` — Framework-level PHPDoc parser (generates `unresolvedReferences`)
+
+### PHP @property Per-Class Limit Fix (2026-06-17)
+
+The original callback synthesizer used a global `MAX_CALLBACKS_PER_CHANNEL = 40` limit for all heuristic edge generation loops, including the PHP @property loop. For classes with 40+ `@property` annotations (e.g., `Im_Ctx` with 62 properties), this caused truncation — later properties were silently skipped.
+
+**Fix:** Introduced a separate `MAX_PHP_PROPERTIES_PER_CLASS = 200` constant specifically for the PHP @property resolution loop, allowing classes with many properties to be fully resolved.
+
+**Before:** `Im_Ctx` -> 40 references edges (truncated)
+**After:** `Im_Ctx` -> 102 references edges (complete)
+
+### Commits (on top of upstream v0.9.7)
+
+| Commit | Description |
+|--------|-------------|
+| `d91d1c6` | feat(resolution): PHP @property PHPDoc synthesis + interface override bridging |
+| `abfb46e` | feat(resolution): synthesize method->method calls edges for PHP @property |
+| `d738e25` | fix(resolution): harden PHP @property calls synthesis |
+| `c583a1e` | test(php-phpdoc): add unit + e2e tests; fix regex for namespaced types |
+| `9942721` | chore: allow Node.js 26+ (V8 WASM bug is Node 25-specific) |
+| _(uncommitted)_ | fix: raise PHP @property per-class limit from 40 to 200 |
+
+## Deployment
+
+This fork is deployed on `vm-sc-mf-util001` via symlink (npm link strategy):
+
+```bash
+# Clone and build
+cd /home/momobot/repos
+git clone https://github.com/hou3301-byte/codegraph.git codegraph-fork
+cd codegraph-fork
+npm ci && npm run build
+
+# Symlink to global npm modules (replaces upstream package)
+ln -sf /home/momobot/repos/codegraph-fork /home/momobot/.npm-global/lib/node_modules/@colbymchenry/codegraph
+
+# Restart MCP bridge
+pm2 restart codegraph-http
+```
+
+To reindex a PHP project after deploying:
+```bash
+NODE=/home/momobot/.local/node24/bin/node
+CG=/home/momobot/repos/codegraph-fork/dist/bin/codegraph.js
+cd /home/momobot/repos/<project>
+$NODE $CG index
+```
+
+---
+
 ## Get Started
 
 **No Node.js required** — one command grabs the right build for your OS:
