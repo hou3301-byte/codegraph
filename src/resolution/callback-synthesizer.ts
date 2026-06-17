@@ -33,6 +33,8 @@ import { createYielder, type MaybeYield } from './cooperative-yield';
 const REGISTRAR_NAME = /^(on[A-Z]\w*|subscribe|addListener|addEventListener|register|watch|listen|addCallback)$/;
 const DISPATCHER_NAME = /(emit|trigger|notify|dispatch|fire|publish|flush)/i;
 const MAX_CALLBACKS_PER_CHANNEL = 40;
+
+const MAX_PHP_PROPERTIES_PER_CLASS = 200;
 const EVENT_FANOUT_CAP = 6; // skip events with more handlers/dispatchers than this (too generic without type info)
 
 const ON_RE = /\.(?:on|once|addListener)\(\s*['"]([^'"]+)['"]\s*,\s*(?:function\s+(\w+)|(?:this\.)?(\w+))/g;
@@ -3587,7 +3589,7 @@ async function phpPhpdocPropertyEdges(queries: QueryBuilder, ctx: ResolutionCont
       let m: RegExpExecArray | null;
       let added = 0;
       while ((m = PHP_PROPERTY_RE.exec(docblock))) {
-        if (added >= 200) break;
+        if (added >= MAX_PHP_PROPERTIES_PER_CLASS) break;
         const annotation = m[1]!;
         const rawType = m[2]!;
         const propName = m[3]!;
