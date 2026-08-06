@@ -3633,9 +3633,11 @@ async function phpPhpdocPropertyEdges(queries: QueryBuilder, ctx: ResolutionCont
 
     // Pre-index target class methods by (targetTypeName, methodName) for O(1) lookup.
     const targetMethodIndex = new Map<string, Node[]>();
+    const indexedTypes = new Set<string>();
     for (const entries of propMap.values()) {
       for (const { targetTypeName } of entries) {
-        if (targetMethodIndex.has(targetTypeName)) continue;
+        if (indexedTypes.has(targetTypeName)) continue;
+        indexedTypes.add(targetTypeName);
         const targetClasses = ctx.getNodesByName(targetTypeName).filter(
           (n) => (n.kind === 'class' || n.kind === 'interface' || n.kind === 'trait') && n.language === 'php',
         );
